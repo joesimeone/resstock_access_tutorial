@@ -1,0 +1,169 @@
+---
+title: "Querying ResStock with DuckDB"
+subtitle: "A walkthrough for accessing the S3 bucket without downloading files"
+---
+
+[DuckDB](https://duckdb.org/) can query Parquet files directly from S3 — no local download required. This walkthrough covers setup and a handful of useful starting queries against the `metadata_and_annual_results` table, which is the most common entry point for ResStock analysis.
+
+::: {.callout-note}
+All queries here run against OEDI's public S3 bucket, so no AWS credentials are needed. You do need an internet connection and `duckdb` installed (`pip install duckdb`).
+:::
+
+---
+
+## Setup
+
+```{python}
+#| eval: false
+import duckdb
+
+con = duckdb.connect()
+
+con.execute("INSTALL httpfs;")
+con.execute("LOAD httpfs;")
+con.execute("SET s3_region = 'us-west-2';")
+```
+
+That's all the configuration needed. DuckDB's `httpfs` extension handles anonymous access to public S3 buckets automatically.
+
+It helps to define the path to the metadata folder up front, since you'll reuse it across queries:
+
+```{python}
+#| eval: false
+# Root path — swap the filename to switch upgrade scenarios
+METADATA = (
+    "s3://oedi-data-lake/nrel-pds-building-stock/"
+    "end-use-load-profiles-for-us-building-stock/2025/"
+    "resstock_amy2018_release_1/metadata_and_annual_results/"
+    "national/full/parquet/"
+)
+
+baseline    = METADATA + "upgrade0.parquet"
+hp_upgrade  = METADATA + "upgrade4.parquet"   # Cold-climate ducted ASHP
+```
+
+---
+
+## Explore the schema
+
+Before writing queries it's useful to see what columns are available. The metadata files are wide (~hundreds of columns), so this gives you a lay of the land:
+
+```{python}
+#| eval: false
+schema = con.execute(f"DESCRIBE SELECT * FROM read_parquet('{baseline}')").df()
+print(schema[["column_name", "column_type"]].to_string(index=False))
+```
+
+A few column naming conventions to know:
+
+- `in.*` — building input characteristics (e.g., `in.state`, `in.heating_fuel`, `in.vintage`)
+- `out.*` — simulation outputs (e.g., `out.electricity.total.energy_consumption`)
+- `weight` — the statistical weight for each sample (how many real U.S. homes it represents)
+- `bldg_id` — unique building identifier, links to individual timeseries files
+
+---
+
+## Count buildings by state
+
+A simple sanity check — how many simulated buildings are in each state? Multiplying by `weight` gives the estimated real housing units represented.
+
+```{python}
+#| eval: false
+con.execute(f"""
+    SELECT
+        "in.state"                          AS state,
+        COUNT(*)                            AS n_simulated,
+        ROUND(SUM(weight))                  AS n_represented
+    FROM read_parquet('{baseline}')
+    GROUP BY "in.state"
+    ORDER BY n_represented DESC
+    LIMIT 10
+""").df()
+```
+
+---
+
+## Distribution of heating fuels
+
+```{python}
+#| eval: false
+con.execute(f"""
+    SELECT
+        "in.heating_fuel"       AS heating_fuel,
+        COUNT(*)                AS n_buildings,
+        ROUND(SUM(weight))      AS housing_units_represented
+    FROM read_parquet('{baseline}')
+    GROUP BY "in.heating_fuel"
+    ORDER BY housing_units_represented DESC
+""").df()
+```
+
+---
+
+## Compare annual electricity use: baseline vs. heat pump upgrade
+
+Upgrade 4 applies a cold-climate ducted air source heat pump to all eligible buildings. This query pulls annual electricity consumption from both files and computes the difference — joining on `bldg_id` so each row is one building.
+
+```{python}
+#| eval: false
+con.execute(f"""
+    SELECT
+        b.bldg_id,
+        b."in.state"                                            AS state,
+        b."in.heating_fuel"                                     AS baseline_fuel,
+        b."out.electricity.total.energy_consumption"            AS elec_baseline_kwh,
+        h."out.electricity.total.energy_consumption"            AS elec_hp_kwh,
+        h."out.electricity.total.energy_consumption"
+            - b."out.electricity.total.energy_consumption"      AS elec_delta_kwh
+    FROM read_parquet('{baseline}')   AS b
+    JOIN read_parquet('{hp_upgrade}') AS h USING (bldg_id)
+    WHERE b."in.state" = 'CO'
+    LIMIT 20
+""").df()
+```
+
+::: {.callout-tip}
+The `by_state` partition of the metadata is faster for single-state queries because DuckDB only reads the relevant partition. Swap the path like this:
+
+```python
+baseline_co = (
+    "s3://oedi-data-lake/nrel-pds-building-stock/"
+    "end-use-load-profiles-for-us-building-stock/2025/"
+    "resstock_amy2018_release_1/metadata_and_annual_results/"
+    "by_state/full/parquet/upgrade0.parquet"
+)
+```
+
+The file structure is the same — Hive-partitioned by state — so tools that support partition pruning (DuckDB included) will only fetch the slices they need.
+:::
+
+---
+
+## Reading a single building's timeseries
+
+Once you've identified a building of interest from the metadata, you can pull its full sub-hourly timeseries. Files live at:
+
+```
+s3://oedi-data-lake/.../timeseries_individual_buildings/by_state/upgrade={N}/state={XX}/{bldg_id}-{N}.parquet
+```
+
+```{python}
+#| eval: false
+TIMESERIES_ROOT = (
+    "s3://oedi-data-lake/nrel-pds-building-stock/"
+    "end-use-load-profiles-for-us-building-stock/2025/"
+    "resstock_amy2018_release_1/timeseries_individual_buildings/by_state/"
+)
+
+bldg_id  = 100102   # replace with a bldg_id from your metadata query
+upgrade  = 0
+state    = "AK"
+
+ts_path = f"{TIMESERIES_ROOT}upgrade={upgrade}/state={state}/{bldg_id}-{upgrade}.parquet"
+
+ts = con.execute(f"SELECT * FROM read_parquet('{ts_path}')").df()
+print(ts.shape)      # should be ~35,040 rows (15-min intervals × 8,760 hours)
+ts.head()
+```
+
+Each row is one 15-minute interval. Columns follow the same `out.*` naming convention as the metadata outputs, broken out by end use (e.g., `out.electricity.heating.energy_consumption`, `out.electricity.cooling.energy_consumption`).

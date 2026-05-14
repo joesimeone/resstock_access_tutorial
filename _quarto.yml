@@ -1,0 +1,21 @@
+project:
+  type: website
+
+website:
+  title: "ResStock 2025 — Data Orientation"
+  description: "A quick guide to NREL's end-use load profiles for U.S. building stock"
+  navbar:
+    left:
+      - href: index.qmd
+        text: Overview
+      - href: sample_analysis.qmd
+        text: Sample Analysis
+
+format:
+  html:
+    theme: cosmo
+    toc: true
+    toc-depth: 3
+    toc-title: "On this page"
+    smooth-scroll: true
+    css: styles.css

@@ -1,0 +1,10 @@
+_site/
+.quarto/
+*.html
+*.knit.md
+*_files/
+.Rhistory
+.RData
+.Rproj.user/
+__pycache__/
+.DS_Store

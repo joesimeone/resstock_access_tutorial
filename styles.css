@@ -1,0 +1,25 @@
+/* File tree block */
+.filetree {
+  background-color: #f8f9fa;
+  border: 1px solid #dee2e6;
+  border-left: 4px solid #0d6efd;
+  border-radius: 4px;
+  padding: 1.2rem 1.5rem;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 0.82rem;
+  line-height: 1.7;
+  overflow-x: auto;
+  white-space: pre;
+}
+
+/* Upgrade table tweaks */
+.upgrade-table th {
+  background-color: #e9ecef;
+}
+
+/* Section dividers */
+h2 {
+  margin-top: 2.5rem;
+  padding-top: 0.5rem;
+  border-top: 1px solid #dee2e6;
+}
