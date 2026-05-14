@@ -206,7 +206,7 @@ reactable(
   columns = list(
     Category = colDef(
       minWidth = 130,
-      style = list(fontWeight = "600", color = "#2c3e50")
+      style = list(fontWeight = "600")
     ),
     Description = colDef(minWidth = 260),
     Examples = colDef(
@@ -215,25 +215,19 @@ reactable(
       cell = function(value) {
         cols <- strsplit(value, "\n")[[1]]
         div(lapply(cols, function(x) tags$code(
-          style = "display:block; font-size:0.76em; margin-bottom:3px; color:#495057;",
+          style = "display:block; font-size:0.76em; margin-bottom:3px;",
           x
         )))
       }
     ),
     Units = colDef(maxWidth = 115, align = "center")
   ),
-  striped = TRUE,
-  highlight = TRUE,
+  striped = FALSE,
+  highlight = FALSE,
   bordered = TRUE,
   theme = reactableTheme(
-    stripedColor = "#f8f9fa",
-    highlightColor = "#e8f4fd",
-    borderColor = "#dee2e6",
-    headerStyle = list(
-      backgroundColor = "#e9ecef",
-      fontWeight = "600",
-      borderBottom = "2px solid #adb5bd"
-    )
+    borderColor = "var(--rt-border-color)",
+    headerStyle = list(fontWeight = "600")
   ),
   fullWidth = TRUE
 )
@@ -300,23 +294,19 @@ reactable(
   columns = list(
     Variable = colDef(
       minWidth = 175,
-      style = list(fontWeight = "600", color = "#2c3e50")
+      style = list(fontWeight = "600")
     ),
     Description = colDef(minWidth = 320),
     Units = colDef(maxWidth = 90, align = "center")
   ),
-  striped = TRUE,
-  highlight = TRUE,
+  striped = FALSE,
+  highlight = FALSE,
   bordered = TRUE,
   theme = reactableTheme(
     stripedColor = "#f8f9fa",
     highlightColor = "#e8f4fd",
-    borderColor = "#dee2e6",
-    headerStyle = list(
-      backgroundColor = "#e9ecef",
-      fontWeight = "600",
-      borderBottom = "2px solid #adb5bd"
-    )
+    borderColor = "var(--rt-border-color)",
+    headerStyle = list(fontWeight = "600")
   ),
   fullWidth = TRUE
 )
