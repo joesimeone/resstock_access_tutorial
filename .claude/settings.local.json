@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:oedi-data-lake.s3.amazonaws.com)",
+      "Bash(quarto --version)",
+      "Bash(quarto render *)",
+      "Bash(open /Users/joesimeone/Desktop/positron_master/resstock_access_tutorial/_site/index.html)"
+    ]
+  }
+}

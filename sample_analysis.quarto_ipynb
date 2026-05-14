@@ -1,0 +1,275 @@
+{
+  "cells": [
+    {
+      "cell_type": "markdown",
+      "metadata": {},
+      "source": [
+        "---\n",
+        "title: \"Querying ResStock with DuckDB\"\n",
+        "subtitle: \"A walkthrough for accessing the S3 bucket without downloading files\"\n",
+        "---\n",
+        "\n",
+        "\n",
+        "[DuckDB](https://duckdb.org/) can query Parquet files directly from S3 — no local download required. This walkthrough covers setup and a handful of useful starting queries against the `metadata_and_annual_results` table, which is the most common entry point for ResStock analysis.\n",
+        "\n",
+        "::: {.callout-note}\n",
+        "All queries here run against OEDI's public S3 bucket, so no AWS credentials are needed. You do need an internet connection and `duckdb` installed (`pip install duckdb`).\n",
+        ":::\n",
+        "\n",
+        "---\n",
+        "\n",
+        "## Setup\n"
+      ],
+      "id": "ef46395e"
+    },
+    {
+      "cell_type": "code",
+      "metadata": {},
+      "source": [
+        "#| eval: false\n",
+        "import duckdb\n",
+        "\n",
+        "con = duckdb.connect()\n",
+        "\n",
+        "con.execute(\"INSTALL httpfs;\")\n",
+        "con.execute(\"LOAD httpfs;\")\n",
+        "con.execute(\"SET s3_region = 'us-west-2';\")"
+      ],
+      "id": "9a7056f7",
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {},
+      "source": [
+        "That's all the configuration needed. DuckDB's `httpfs` extension handles anonymous access to public S3 buckets automatically.\n",
+        "\n",
+        "It helps to define the path to the metadata folder up front, since you'll reuse it across queries:\n"
+      ],
+      "id": "dfbe087a"
+    },
+    {
+      "cell_type": "code",
+      "metadata": {},
+      "source": [
+        "#| eval: false\n",
+        "# Root path — swap the filename to switch upgrade scenarios\n",
+        "METADATA = (\n",
+        "    \"s3://oedi-data-lake/nrel-pds-building-stock/\"\n",
+        "    \"end-use-load-profiles-for-us-building-stock/2025/\"\n",
+        "    \"resstock_amy2018_release_1/metadata_and_annual_results/\"\n",
+        "    \"national/full/parquet/\"\n",
+        ")\n",
+        "\n",
+        "baseline    = METADATA + \"upgrade0.parquet\"\n",
+        "hp_upgrade  = METADATA + \"upgrade4.parquet\"   # Cold-climate ducted ASHP"
+      ],
+      "id": "30bc957e",
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {},
+      "source": [
+        "---\n",
+        "\n",
+        "## Explore the schema\n",
+        "\n",
+        "Before writing queries it's useful to see what columns are available. The metadata files are wide (~hundreds of columns), so this gives you a lay of the land:\n"
+      ],
+      "id": "b1498d6f"
+    },
+    {
+      "cell_type": "code",
+      "metadata": {},
+      "source": [
+        "#| eval: false\n",
+        "schema = con.execute(f\"DESCRIBE SELECT * FROM read_parquet('{baseline}')\").df()\n",
+        "print(schema[[\"column_name\", \"column_type\"]].to_string(index=False))"
+      ],
+      "id": "2f5466e3",
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {},
+      "source": [
+        "A few column naming conventions to know:\n",
+        "\n",
+        "- `in.*` — building input characteristics (e.g., `in.state`, `in.heating_fuel`, `in.vintage`)\n",
+        "- `out.*` — simulation outputs (e.g., `out.electricity.total.energy_consumption`)\n",
+        "- `weight` — the statistical weight for each sample (how many real U.S. homes it represents)\n",
+        "- `bldg_id` — unique building identifier, links to individual timeseries files\n",
+        "\n",
+        "---\n",
+        "\n",
+        "## Count buildings by state\n",
+        "\n",
+        "A simple sanity check — how many simulated buildings are in each state? Multiplying by `weight` gives the estimated real housing units represented.\n"
+      ],
+      "id": "c9fde4be"
+    },
+    {
+      "cell_type": "code",
+      "metadata": {},
+      "source": [
+        "#| eval: false\n",
+        "con.execute(f\"\"\"\n",
+        "    SELECT\n",
+        "        \"in.state\"                          AS state,\n",
+        "        COUNT(*)                            AS n_simulated,\n",
+        "        ROUND(SUM(weight))                  AS n_represented\n",
+        "    FROM read_parquet('{baseline}')\n",
+        "    GROUP BY \"in.state\"\n",
+        "    ORDER BY n_represented DESC\n",
+        "    LIMIT 10\n",
+        "\"\"\").df()"
+      ],
+      "id": "ef4b1817",
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {},
+      "source": [
+        "---\n",
+        "\n",
+        "## Distribution of heating fuels\n"
+      ],
+      "id": "6bf1d59d"
+    },
+    {
+      "cell_type": "code",
+      "metadata": {},
+      "source": [
+        "#| eval: false\n",
+        "con.execute(f\"\"\"\n",
+        "    SELECT\n",
+        "        \"in.heating_fuel\"       AS heating_fuel,\n",
+        "        COUNT(*)                AS n_buildings,\n",
+        "        ROUND(SUM(weight))      AS housing_units_represented\n",
+        "    FROM read_parquet('{baseline}')\n",
+        "    GROUP BY \"in.heating_fuel\"\n",
+        "    ORDER BY housing_units_represented DESC\n",
+        "\"\"\").df()"
+      ],
+      "id": "ac8e55bd",
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {},
+      "source": [
+        "---\n",
+        "\n",
+        "## Compare annual electricity use: baseline vs. heat pump upgrade\n",
+        "\n",
+        "Upgrade 4 applies a cold-climate ducted air source heat pump to all eligible buildings. This query pulls annual electricity consumption from both files and computes the difference — joining on `bldg_id` so each row is one building.\n"
+      ],
+      "id": "e3d5f193"
+    },
+    {
+      "cell_type": "code",
+      "metadata": {},
+      "source": [
+        "#| eval: false\n",
+        "con.execute(f\"\"\"\n",
+        "    SELECT\n",
+        "        b.bldg_id,\n",
+        "        b.\"in.state\"                                            AS state,\n",
+        "        b.\"in.heating_fuel\"                                     AS baseline_fuel,\n",
+        "        b.\"out.electricity.total.energy_consumption\"            AS elec_baseline_kwh,\n",
+        "        h.\"out.electricity.total.energy_consumption\"            AS elec_hp_kwh,\n",
+        "        h.\"out.electricity.total.energy_consumption\"\n",
+        "            - b.\"out.electricity.total.energy_consumption\"      AS elec_delta_kwh\n",
+        "    FROM read_parquet('{baseline}')   AS b\n",
+        "    JOIN read_parquet('{hp_upgrade}') AS h USING (bldg_id)\n",
+        "    WHERE b.\"in.state\" = 'CO'\n",
+        "    LIMIT 20\n",
+        "\"\"\").df()"
+      ],
+      "id": "68ce2fbf",
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {},
+      "source": [
+        "::: {.callout-tip}\n",
+        "The `by_state` partition of the metadata is faster for single-state queries because DuckDB only reads the relevant partition. Swap the path like this:\n",
+        "\n",
+        "```python\n",
+        "baseline_co = (\n",
+        "    \"s3://oedi-data-lake/nrel-pds-building-stock/\"\n",
+        "    \"end-use-load-profiles-for-us-building-stock/2025/\"\n",
+        "    \"resstock_amy2018_release_1/metadata_and_annual_results/\"\n",
+        "    \"by_state/full/parquet/upgrade0.parquet\"\n",
+        ")\n",
+        "```\n",
+        "\n",
+        "The file structure is the same — Hive-partitioned by state — so tools that support partition pruning (DuckDB included) will only fetch the slices they need.\n",
+        ":::\n",
+        "\n",
+        "---\n",
+        "\n",
+        "## Reading a single building's timeseries\n",
+        "\n",
+        "Once you've identified a building of interest from the metadata, you can pull its full sub-hourly timeseries. Files live at:\n",
+        "\n",
+        "```\n",
+        "s3://oedi-data-lake/.../timeseries_individual_buildings/by_state/upgrade={N}/state={XX}/{bldg_id}-{N}.parquet\n",
+        "```\n"
+      ],
+      "id": "f234c268"
+    },
+    {
+      "cell_type": "code",
+      "metadata": {},
+      "source": [
+        "#| eval: false\n",
+        "TIMESERIES_ROOT = (\n",
+        "    \"s3://oedi-data-lake/nrel-pds-building-stock/\"\n",
+        "    \"end-use-load-profiles-for-us-building-stock/2025/\"\n",
+        "    \"resstock_amy2018_release_1/timeseries_individual_buildings/by_state/\"\n",
+        ")\n",
+        "\n",
+        "bldg_id  = 100102   # replace with a bldg_id from your metadata query\n",
+        "upgrade  = 0\n",
+        "state    = \"AK\"\n",
+        "\n",
+        "ts_path = f\"{TIMESERIES_ROOT}upgrade={upgrade}/state={state}/{bldg_id}-{upgrade}.parquet\"\n",
+        "\n",
+        "ts = con.execute(f\"SELECT * FROM read_parquet('{ts_path}')\").df()\n",
+        "print(ts.shape)      # should be ~35,040 rows (15-min intervals × 8,760 hours)\n",
+        "ts.head()"
+      ],
+      "id": "2d431c43",
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "metadata": {},
+      "source": [
+        "Each row is one 15-minute interval. Columns follow the same `out.*` naming convention as the metadata outputs, broken out by end use (e.g., `out.electricity.heating.energy_consumption`, `out.electricity.cooling.energy_consumption`)."
+      ],
+      "id": "d7b93dc6"
+    }
+  ],
+  "metadata": {
+    "kernelspec": {
+      "name": "python3",
+      "language": "python",
+      "display_name": "Python 3 (ipykernel)",
+      "path": "/opt/anaconda3/share/jupyter/kernels/python3"
+    }
+  },
+  "nbformat": 4,
+  "nbformat_minor": 5
+}
