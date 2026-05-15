@@ -3,11 +3,33 @@ title: "NREL ResStock 2025 — Data Orientation"
 subtitle: "End-Use Load Profiles for U.S. Building Stock · resstock_amy2018_release_1"
 ---
 
+```{r}
+#| include: false
+library(reactable)
+library(htmltools)
+```
+
+# Introducing ResStock 
+
 ## What is this dataset?
 
-ResStock is NREL's large-scale simulation model of the U.S. residential building stock. The **2025 release** (`resstock_amy2018_release_1`) simulated roughly 550,000 representative homes using EnergyPlus with **2018 actual meteorological year (AMY)** weather — real observed conditions rather than the "typical" year used in most energy codes.
+[ResStock](https://resstock.nlr.gov/datasets) is NREL's large-scale simulation model of 2019 U.S. residential building stock. The **2025 release** (`resstock_amy2018_release_1`) simulated roughly 550,000 representative homes using EnergyPlus with **2018 actual meteorological year (AMY)** weather. Each home was simulated under a **baseline (as-is)** condition and **32 upgrade scenarios** covering equipment replacements, envelope improvements, electric vehicles, and demand flexibility strategies. Results are available in **15-minute** increments for the full year, covering subjects such as **energy consumption**, **emissions**, and the **indoor environment**. 
 
-Each home was simulated under a **baseline (as-is)** condition and **32 upgrade scenarios** covering equipment replacements, envelope improvements, electric vehicles, and demand flexibility strategies. The result is a rich, nationally representative picture of residential energy use — how much, when, by what end use, and how it changes under different efficiency or electrification interventions.
+While ResStock is an incredibly rich source of information, orienting oneself to its contents can be... overwhelming. I'm writing this guide mostly to share some things that I've learned. 
+
+## Who is this guide for? 
+
+Anyone who feels like they needs some help accessing ResStocks daily estimates or orienting themselves to the many resources NREL provides. I'm writing this primarily for members of Drexel's **R01 Heat Study Team**, who are health researchers interested in the effects indoor temperature. Our use case is a little non-traditional for ePlus simulations, but anyone encountering stuff like [s3 buckets](https://aws.amazon.com/s3/?trk=50b671a1-06f5-4224-9505-fa45ee881c08&sc_channel=ps&trk=319436d7-2418-4600-ad06-bad3656784a3&sc_channel=ps&ef_id=Cj0KCQjwiJvQBhCYARIsAMjts3Jv8zopax1uNKTcIR-UN6GiLZKWQzZHna_m-In8mWYwKa3TE-QglwYaAq-EEALw_wcB:G:s&s_kwcid=AL!4422!3!808868439763!e!!g!!amazonaws%20s3!23522747487!196433733807&gad_campaignid=23522747487&gbraid=0AAAAADjHtp-hSB5jcKGNMoF5yFF9jvvBZ&gclid=Cj0KCQjwiJvQBhCYARIsAMjts3Jv8zopax1uNKTcIR-UN6GiLZKWQzZHna_m-In8mWYwKa3TE-QglwYaAq-EEALw_wcB) or [hive partitions](https://delta.io/blog/pros-cons-hive-style-partionining/) for the first time might find this useful.
+
+## What's here?
+
+On overview page, users will find an overview of what's available in the **ResStock 2025** release, including some information on the metadata and annual results, individual building time series, and amy 2018 weather data. 
+
+On the sample analysis page, users can follow along as I work try to answer the following question -- **how does indoor temperature in Philadelphia area single attached homes vary across the year, and how much energy do people spend keeping these homes comfortable?**
+
+## Where does ResStock data live? 
+
+ResStock data are available on a free and open S3 bucket.
 
 **S3 root path:**
 
@@ -17,11 +39,22 @@ s3://oedi-data-lake/nrel-pds-building-stock/end-use-load-profiles-for-us-buildin
 
 **OEDI browser:** [Open dataset in S3 viewer](https://data.openei.org/s3_viewer?bucket=oedi-data-lake&prefix=nrel-pds-building-stock%2Fend-use-load-profiles-for-us-building-stock%2F2025%2Fresstock_amy2018_release_1%2F)
 
+In essence, an s3 bucket is jargon for *a file storage system that lives online*. Like local file systems, you can and should click around a bit to orient yourself, but your reach grows when you incorporate software tools. This may sound like a lot. The good news is that, if you're able to read local files into R or Python, you can access an S3 bucket with similar principles. It's only a question of what tool you should use and where you should point it. 
+
+
 ---
+
+# Data Organization & Helpers 
+
+::: {.callout-note}
+ I've started us a little deeper in the file system than it's start. The full path to 2025 (and other releases) is: `oedi-data-lake/nrel-pds-building-stock/end-use-for-us-building-stock/*`
+
+But the substance of ResStock doesn't real start until you hit the year paths, so I'm starting there. 
+:::
 
 ## Folder Map
 
-Files and folders at the root of `resstock_amy2018_release_1/`, with a one-line description of what each contains.
+Files and folders at the root of `2025/resstock_amy2018_release_1/`
 
 <pre class="filetree">
 resstock_amy2018_release_1/
@@ -90,16 +123,21 @@ resstock_amy2018_release_1/
 
 ### `metadata_and_annual_results/`
 
-This is the most common starting point for analysis. It contains a **wide, flat table** where each row is one simulated building and columns cover two things: (1) the building's characteristics, and (2) its annual energy consumption.
+This is the most common starting point for analysis. It contains a **wide, flat table** where each row is one simulated building and columns cover two things: (1) the building's characteristics, denoted by `in.{variable_name}`, and (2) its annual energy consumption (outputs from ePlus), denoted by `out.{variable_name}.` 
 
-**What the building characteristics columns include:**
+::: {.callout-note}
+ Not all of the outputs from ePlus are available in the annual metadata file. **Indoor temperature estimates**, for example, are only available in the individual building files. I think they only include things that can be summed across the whole year. 
+:::
+
+
+**What the building characteristics (in.{variable}) columns include:**
 
 - Location: state, PUMA (Public Use Microdata Area), county, climate zone
 - Geometry: floor area, number of stories, foundation type, vintage (decade of construction)
 - Envelope: insulation levels (attic, walls, foundation), window type, infiltration rate
 - Systems: heating fuel and equipment type, cooling type, water heater type, duct location
 
-**What the annual energy columns include:**
+**What the annual energy (out.{variable}) columns include:**
 
 - Total site energy consumption (kWh, therms) broken out by end use: heating, cooling, water heating, lighting, refrigerator, dishwasher, clothes dryer, plug loads, etc.
 - Both electricity and fuel-specific breakdowns
@@ -112,17 +150,21 @@ metadata_and_annual_results/
 └── by_state/full/{csv,parquet}/   → same data, state-partitioned
 ```
 
-The `national/` files contain all ~550,000 buildings in a single file per upgrade scenario — convenient but large (Parquet files range from ~465 MB for the baseline to ~830 MB for some upgrades). The `by_state/` files hold the same data partitioned by state, which is useful for cloud query engines (Athena, DuckDB, Spark) that can push down state filters without reading the full table.
-
-Both `csv/` and `parquet/` subdirectories are provided. Parquet is strongly preferred for performance; CSV is there if you need a format that opens without special tools.
+The `national/` files contain all ~550,000 buildings in a single file per upgrade scenario. Its convenient but maybe a little large for some computers. The `by_state/` files hold the same data partitioned by state, which is useful for cloud query engines (Athena, DuckDB, Spark) that can push down state filters without reading the full table.
 
 Files are named `upgrade0.parquet`, `upgrade1.parquet`, ..., `upgrade32.parquet`. Upgrade 0 is the **baseline** (buildings as they currently exist); upgrades 1–32 represent hypothetical retrofits applied to the same set of buildings (see [Building Upgrades] below).
+
+Both `csv/` and `parquet/` subdirectories are provided. I really, really reccommend that use [parquet files](https://parquet.apache.org/) for anything ResStock related. Both the storage and performance make the tradeoff in less familiar file format worthwhile. 
+
+If you're not familiar with parquet, don't sweat it! It's another way of storing tabular data meant to be accessed with software. In the analysis section, I'll show you how you can use `{duckdb}`(https://duckdb.org/docs/current/clients/r) to access them. 
+
 
 ---
 
 ### `timeseries_individual_buildings/`
 
-This folder contains the full sub-hourly timeseries for every simulated building — the most granular data in the dataset. Each Parquet file holds **one building's entire year of simulation output** at 15-minute intervals (~35,040 rows). The files are substantially richer than just energy consumption: they include indoor environmental conditions, emissions, airflow, occupant schedules, and weather.
+This folder contains the full sub-hourly timeseries for every simulated building — the most granular data in the dataset. Each Parquet file holds **one building's entire year of simulation output** at 15-minute intervals (~35,040 rows). These files are far richer than just energy consumption. they include indoor environmental conditions, emissions, airflow, occupant schedules, and weather.
+
 
 **Structure:**
 
@@ -134,7 +176,7 @@ timeseries_individual_buildings/
             └── {building_id}-{upgrade}.parquet
 ```
 
-Files are named like `100102-0.parquet` — the number before the dash is the building's unique ID, the number after is the upgrade scenario. Individual files are small (~2–3 MB each), but the full dataset across all states and upgrades is enormous, so **always filter by state and upgrade** before downloading at scale.
+Files are named like `100102-0.parquet` — the number before the dash is the building's unique ID, the number after is the upgrade scenario. Individual files are small (~2–3 MB each), but the full dataset across all states and upgrades is enormous (roughly `r formatC(550000 * 35040, big.mark = ',')`). Working with them requires big data tools and a little finesse. **Always filter by state and upgrade** before downloading at scale.
 
 **Column naming convention**
 
@@ -150,13 +192,6 @@ The leading `out.` marks simulation outputs. `in.sqft` (floor area) is the one i
 
 *Identifiers:* `bldg_id`, `timestamp`, `state`, `upgrade`, `in.sqft`
 
-*Energy consumption* — absolute (kWh) and intensity (kWh/ft²) for each fuel × end use combination:
-
-| Fuels | End uses |
-|-------|----------|
-| Electricity, Natural gas, Propane, Fuel oil | Heating, cooling, water heating, clothes dryer, clothes washer, dishwasher, refrigerator, freezer, lighting (interior, exterior, garage), plug loads, range/oven, ceiling fan, EV charging, pool/spa, well pump, PV generation, mechanical ventilation, heat pump backup |
-| Site energy (all fuels combined) | Net and total |
-
 ```{r}
 #| echo: false
 #| message: false
@@ -165,6 +200,7 @@ library(htmltools)
 
 d <- data.frame(
   Category = c(
+    "Energy consumption",
     "Emissions",
     "Thermal loads",
     "Indoor environment",
@@ -175,6 +211,7 @@ d <- data.frame(
     "Unmet hours"
   ),
   Description = c(
+    "Absolute (kWh) and intensity (kWh/ft²) columns for every fuel × end use combination. Fuels: electricity, natural gas, propane, fuel oil, and site energy (all fuels combined). End uses: heating, cooling, water heating, clothes dryer, clothes washer, dishwasher, refrigerator, freezer, lighting (interior/exterior/garage), plug loads, range/oven, ceiling fan, EV charging, pool/spa, well pump, PV generation, mechanical ventilation, and heat pump backup. Site energy provides net and total rollups across all fuels.",
     "CO₂e from electricity under multiple grid carbon scenarios (AER and LRMER variants at 15- and 25-year horizons). Single columns for natural gas, propane, and fuel oil combustion.",
     "Heating and cooling energy actually delivered to conditioned space — distinct from equipment consumption, which reflects efficiency losses. Includes hot water and heat pump backup loads.",
     "Dry bulb, operative, radiant, and dewpoint temperatures plus relative humidity and humidity ratio inside conditioned space, all at 15-minute resolution.",
@@ -185,6 +222,7 @@ d <- data.frame(
     "Hours per interval where the heating or cooling setpoint could not be maintained, and EV driving hours that could not be satisfied by available charge."
   ),
   Examples = c(
+    "out.electricity.heating.energy_consumption..kwh\nout.site_energy.total.energy_consumption..kwh",
     "out.emissions.electricity.total.lrmer_midcase_25..co2e_kg\nout.emissions.natural_gas.total..co2e_kg",
     "out.load.heating.energy_delivered..kbtu\nout.load.cooling.energy_delivered..kbtu",
     "out.indoor_temperature.conditioned_space..c\nout.indoor_relative_humidity.conditioned_space..percentage",
@@ -195,6 +233,7 @@ d <- data.frame(
     "out.unmet_hours.heating..hour\nout.unmet_hours.cooling..hour"
   ),
   Units = c(
+    "kWh, kWh/ft²",
     "kg CO₂e", "kBtu", "°C, %", "°C, W/m², m/s",
     "CFM", "gallons", "0–1 fraction", "hours"
   ),
