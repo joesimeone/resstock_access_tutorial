@@ -1,63 +1,159 @@
 ---
 title: "Querying ResStock with DuckDB"
-subtitle: "A walkthrough for accessing the S3 bucket without downloading files"
+subtitle: "A walkthrough for accessing the ResStock S3 bucket"
 ---
+
+# What's going on in here? 
+This walkthrough covers how I would answer the following question:
+
+> **1. How does indoor temperature relate to outdoor temperature in Philadelphia area single family attached homes?**
+
+> **2. How much do energy do people consume for cooling during the summer?**
+
+We'll use a tool called [`DuckDB`](https://duckdb.org/) to query both the [`annual_metadata`](https://data.openei.org/s3_viewer?bucket=oedi-data-lake&prefix=nrel-pds-building-stock%2Fend-use-load-profiles-for-us-building-stock%2F2025%2Fresstock_amy2018_release_1%2Fmetadata_and_annual_results%2F&limit=50) files and the individual building files from R. Ideally, this walkthrough will give you some tools that you can transfer to your question of interest. 
+
+::: {.callout-caution}
+This walkthrough assumes some knowledge of the [`{DBI}`](https://cran.r-project.org/web/packages/DBI/index.html) package and accessing databases in R. I'll touch on some of the concepts, but getting too in the weeds would make this post kind of long. For a more thorough introduction, see [Chapter 21 on databases from *R for Data Science 2e*](https://r4ds.hadley.nz/databases.html)
+
+:::
+
+# Setup
+
+
+## What's duckdb?
+Like any R analysis, the first thing we need to is install and load our package(s): 
+
+```{r}
+#| echo: true
+#| code-fold: show
+#| message: false 
+#| warning: false
+
+pacman::p_load('duckdb', 'tidyverse')
+```
+
+`{duckdb}` is a free, in-process database management system, which is a fancy way of storing and interacting with tabular data. It's smart, fast, and designed to work with hieararchical file systems like the ones 
+stored in ResStock' S3 bucket. 
+
+Using `{duckdb}` requires us write a little SQL, which is kind of an ugly, plain language way of interacting with data. But we'll get into that in a bit. 
+
+
+::: {.callout-note}
+All queries here run against OEDI's public S3 bucket, so no AWS credentials are needed. You do need an internet connection.
+:::
+
+## Establish database connection in R
+
+When working in databases with R, the first thing that we need to do is establish a connection:
+
+```{r}
+#| echo: true
+#| code-fold: show
+
+temporary_con <- dbConnect(duckdb(), ":memory:") #' Temporary / default. Only lasts as long as r session
+permanent_con <- dbConnect(duckdb(), 'data/db_storage.duckdb') #' A file path to store permanent results
+```
+
+First we tell R our database driver (duckdb), then we tell it how we want to store data. **For ResStock analyses, I recommend storing query results permanently, either locally or on a Drexel server.** As researchers, we often wind up with 10 dozen auxiallary questions, and it seems better to me to start analyses from a permanent place then hitting ReStock's s3 bucket every time. In the long run, this will also save you lots of time. 
+
+
+## Loading s3 connection extentions for our database connection
+
+The other thing we'll need is to load a few duckdb extensions that let it talk to websites. Like R, duckb has a package and extension ecosystem, which we can install and load like this:
+
+```{r}
+#| echo: true
+#| code-fold: show
+#| message: false
+#| collapse: true
+
+# Enable HTTP filesystem and S3 support
+dbExecute(permanent_con, "INSTALL httpfs")
+dbExecute(permanent_con, "LOAD httpfs")
+
+# Public bucket — anonymous access
+dbExecute(permanent_con, "SET s3_region = 'us-west-2'") #' Which sere
+dbExecute(permanent_con, "SET s3_access_key_id = ''") #' Public, so no credentials needed
+dbExecute(permanent_con, "SET s3_secret_access_key = ''") #' Public, so no credentials needed
+```
+
+In this step, I also configured our database to talk through data hosted on amazon's S3 server. 
+
+And now we're setup!
+---
+
+# Establishing a connection
+
+Remember I said that working with these things is like working with a file system that lives on the cloud? It took some setup, but we're finally able to make that real.
+
+## Build a file path
+Imagine that you were connecting to a file locally. You might do something like this:
+
+```{r}
+#| echo: true
+#| code-fold: show
+#| collapse: true
+
+#' Path where data lives on S3 bucket
+base_path <- 
+  paste0("s3://oedi-data-lake/nrel-pds-building-stock/end-use-load-profiles-for-us-building-stock/2025/resstock_amy2018_release_1/")
+
+base_path
+```
+
+You can think of that like your project root or working directory. 
+
+Now, let's say that we want to start making some progress on our question. We know that we're interested in the Philadelphia CBSA, which comprises parts of Pennsylvania, Delaware and New Jersey. 
+
+We can keep our footprint small by focusing on those states sub-directories. We'll start by building out some filepaths for upgrade 0 parquets. 
+
+```{r}
+#| echo: true
+#| code-fold: show
+#| collapse: true
+
+states <-
+  c('PA', 'DE', 'NJ')
+
+mtd_ann_results <- glue::glue(
+  "metadata_and_annual_results/by_state/full/parquet/state={states}/{states}_upgrade0.parquet"
+)
+
+
+st_file_paths <-
+  paste0(base_path, mtd_ann_results)
+
+st_file_paths
+```
+
+This gives us a 3 element character vector, where one vector element equals a state's file path. We can use these to (finally) connect to something. 
+
+## Get annual table schema
+
+Let's see what variables are available in the Pennsylvania table: 
 
 ```{r}
 #| include: false
-knitr::opts_chunk$set(python.reticulate = FALSE)
+schema <-
+  readr::read_csv('data/resstock_ann_table_schema.csv')
+```
+```{r}
+#| echo: true
+#| code-fold: show
+#| eval: false 
+
+schema <- dbGetQuery(permanent_con, sprintf(
+  "DESCRIBE SELECT * 
+   FROM read_parquet('%s') LIMIT 0",
+  st_file_paths[1]
+))
+
+head(schema)
+
 ```
 
-[DuckDB](https://duckdb.org/) can query Parquet files directly from S3 — no local download required. This walkthrough covers setup and a handful of useful starting queries against the `metadata_and_annual_results` table, which is the most common entry point for ResStock analysis.
+Now, we have a list of column names, formats, and some empty metadata that you don't really need to worry about. We can use this schema to look through and figure out what variables that we need to start answering our question. 
 
-::: {.callout-note}
-All queries here run against OEDI's public S3 bucket, so no AWS credentials are needed. You do need an internet connection and `duckdb` installed (`pip install duckdb`).
-:::
-
----
-
-## Setup
-
-```{python}
-#| eval: false
-import duckdb
-
-con = duckdb.connect()
-
-con.execute("INSTALL httpfs;")
-con.execute("LOAD httpfs;")
-con.execute("SET s3_region = 'us-west-2';")
-```
-
-That's all the configuration needed. DuckDB's `httpfs` extension handles anonymous access to public S3 buckets automatically.
-
-It helps to define the path to the metadata folder up front, since you'll reuse it across queries:
-
-```{python}
-#| eval: false
-# Root path — swap the filename to switch upgrade scenarios
-METADATA = (
-    "s3://oedi-data-lake/nrel-pds-building-stock/"
-    "end-use-load-profiles-for-us-building-stock/2025/"
-    "resstock_amy2018_release_1/metadata_and_annual_results/"
-    "national/full/parquet/"
-)
-
-baseline    = METADATA + "upgrade0.parquet"
-hp_upgrade  = METADATA + "upgrade4.parquet"   # Cold-climate ducted ASHP
-```
-
----
-
-## Explore the schema
-
-Before writing queries it's useful to see what columns are available. The metadata files are wide (~hundreds of columns), so this gives you a lay of the land:
-
-```{python}
-#| eval: false
-schema = con.execute(f"DESCRIBE SELECT * FROM read_parquet('{baseline}')").df()
-print(schema[["column_name", "column_type"]].to_string(index=False))
-```
 
 A few column naming conventions to know:
 
@@ -66,130 +162,330 @@ A few column naming conventions to know:
 - `weight` — the statistical weight for each sample (how many real U.S. homes it represents)
 - `bldg_id` — unique building identifier, links to individual timeseries files
 
----
-
-## Count buildings by state
-
-A simple sanity check — how many simulated buildings are in each state? Multiplying by `weight` gives the estimated real housing units represented.
-
-```{python}
-#| eval: false
-con.execute(f"""
-    SELECT
-        "in.state"                          AS state,
-        COUNT(*)                            AS n_simulated,
-        ROUND(SUM(weight))                  AS n_represented
-    FROM read_parquet('{baseline}')
-    GROUP BY "in.state"
-    ORDER BY n_represented DESC
-    LIMIT 10
-""").df()
-```
-
----
-
-## Distribution of heating fuels
-
-```{python}
-#| eval: false
-con.execute(f"""
-    SELECT
-        "in.heating_fuel"       AS heating_fuel,
-        COUNT(*)                AS n_buildings,
-        ROUND(SUM(weight))      AS housing_units_represented
-    FROM read_parquet('{baseline}')
-    GROUP BY "in.heating_fuel"
-    ORDER BY housing_units_represented DESC
-""").df()
-```
-
----
-
-## Compare annual electricity use: baseline vs. heat pump upgrade
-
-Upgrade 4 applies a cold-climate ducted air source heat pump to all eligible buildings. This query pulls annual electricity consumption from both files and computes the difference — joining on `bldg_id` so each row is one building.
-
-```{python}
-#| eval: false
-con.execute(f"""
-    SELECT
-        b.bldg_id,
-        b."in.state"                                            AS state,
-        b."in.heating_fuel"                                     AS baseline_fuel,
-        b."out.electricity.total.energy_consumption"            AS elec_baseline_kwh,
-        h."out.electricity.total.energy_consumption"            AS elec_hp_kwh,
-        h."out.electricity.total.energy_consumption"
-            - b."out.electricity.total.energy_consumption"      AS elec_delta_kwh
-    FROM read_parquet('{baseline}')   AS b
-    JOIN read_parquet('{hp_upgrade}') AS h USING (bldg_id)
-    WHERE b."in.state" = 'CO'
-    LIMIT 20
-""").df()
-```
-
-::: {.callout-tip}
-The `by_state` partition of the metadata is faster for single-state queries because DuckDB only reads the relevant partition. Swap the path like this:
-
-```python
-baseline_co = (
-    "s3://oedi-data-lake/nrel-pds-building-stock/"
-    "end-use-load-profiles-for-us-building-stock/2025/"
-    "resstock_amy2018_release_1/metadata_and_annual_results/"
-    "by_state/full/parquet/upgrade0.parquet"
-)
-```
-
-The file structure is the same — Hive-partitioned by state — so tools that support partition pruning (DuckDB included) will only fetch the slices they need.
-:::
-
----
-
-## Reading a single building's timeseries
-
-Once you've identified a building of interest from the metadata, you can pull its full sub-hourly timeseries. Files live at:
-
-```
-s3://oedi-data-lake/.../timeseries_individual_buildings/by_state/upgrade={N}/state={XX}/{bldg_id}-{N}.parquet
-```
-
-```{python}
-#| eval: false
-TIMESERIES_ROOT = (
-    "s3://oedi-data-lake/nrel-pds-building-stock/"
-    "end-use-load-profiles-for-us-building-stock/2025/"
-    "resstock_amy2018_release_1/timeseries_individual_buildings/by_state/"
-)
-
-bldg_id  = 100102   # replace with a bldg_id from your metadata query
-upgrade  = 0
-state    = "AK"
-
-ts_path = f"{TIMESERIES_ROOT}upgrade={upgrade}/state={state}/{bldg_id}-{upgrade}.parquet"
-
-ts = con.execute(f"SELECT * FROM read_parquet('{ts_path}')").df()
-print(ts.shape)      # should be ~35,040 rows (15-min intervals × 8,760 hours)
-ts.head()
-```
-
-Each row is one 15-minute interval. Columns follow the same `out.*` naming convention as the metadata outputs, broken out by end use (e.g., `out.electricity.heating.energy_consumption`, `out.electricity.cooling.energy_consumption`).
-
----
-
-## ggplot2 theme
-
-A `theme_resstock()` function and matching color scales to keep plots visually consistent with this site.
+Because, I've worked with this data a bit, I know that we can use these variables to identify which levels we'll need to filter for - both Philadelphia & single family attached. 
 
 ```{r}
 #| echo: true
-#| message: false
-library(ggplot2)
+#| code-fold: show
+#| collapse: true 
 
-# ── Theme ──────────────────────────────────────────────────────────────────────
+
+
+pa_house_cbsa_cats <-
+dbGetQuery(permanent_con, 
+  str_glue(
+    "SELECT DISTINCT
+        \"in.geometry_building_type_acs\", 
+        \"in.metropolitan_and_micropolitan_statistical_area\",
+     FROM read_parquet('{st_file_paths[1]}')"
+  )
+) 
+
+
+
+level_names <- 
+pa_house_cbsa_cats |> 
+filter(
+  str_detect(in.geometry_building_type_acs, 'Attached') & 
+  str_detect(in.metropolitan_and_micropolitan_statistical_area, 'Philadelphia')
+)
+
+level_names
+
+
+```
+
+## Filter down to single family attached homes in Philly CBSA
+
+Now, we want to get the identifiers associated with single family attached homes in Philly. Now we'll use our other paths, and some r iteration to make that happen.
+
+```{r}
+#| echo: true
+#| code-fold: show
+#| message: false
+#| collapse: true
+
+attached_ids <- map(
+  st_file_paths,
+  function(s3_path) {
+
+    cli::cli_alert('trying {s3_path}:')
+    dbGetQuery(
+      permanent_con,
+      str_glue(
+        "SELECT bldg_id 
+         FROM read_parquet('{s3_path}')
+         WHERE \"in.geometry_building_type_acs\" = 'Single-Family Attached'
+         AND \"in.metropolitan_and_micropolitan_statistical_area\" = 'Philadelphia-Camden-Wilmington, PA-NJ-DE-MD MSA'"
+      )
+    )
+  }
+) |> 
+set_names(states)
+
+map(attached_ids, nrow)
+```
+
+We have more ids then we know what to do with! (But more in PA, which makes sense given that's where Philly proper is).
+
+
+# Individual Building Time Series
+
+With the pre-selected `bldg_id` values, we can move to querying the individual building time series and looking at our outcomes of interst. The process will be the same, (specify path --> write query ---> get result), but this time, we'll use `dbExecute()` and save results to a permanent table.
+
+
+## Specify Paths 
+
+We can tack on the individual building time series path to our base path. 
+
+```{r}
+#| echo: true
+#| code-fold: show
+#| collapse: true
+
+## Coerce to data frame to help stich together paths 
+attached_ids_df <-
+imap(attached_ids, ~.x |> mutate(state = .y)) |> 
+list_rbind()
+
+indvid_build_path <- 
+  str_glue(
+  'timeseries_individual_buildings/by_state/upgrade=0/state={attached_ids_df$state}/{attached_ids_df$bldg_id}-0.parquet')
+
+build_path_fin <-
+  paste0(base_path, indvid_build_path)
+
+length(build_path_fin)
+
+```
+
+
+## Build the Query
+
+Recall that building time series live in a slightly different place than the metadata that we just queried. These data are available in 15 increments for every building in the annual metadata for each day in 2018. This is a lot a lot of stuff, which is why we just spent time trying to focus our query. 
+
+For our purposes, we don't really care about that 15-minute increments. Rather we'll just focus on daily values for the moment. This means that we need to write some sql to aggregate from minutes to days. 
+
+```{r}
+#| echo: true
+#| code-fold: show
+query_sfa_path <- paste0("'", build_path_fin, "'", collapse = ", ")
+
+
+sfa_temps_query <-
+  str_glue(
+    "CREATE TABLE phl_sfa_temps AS 
+SELECT
+
+ ---- Time & Metadata Stuff 
+  bldg_id,
+  CAST(timestamp AS DATE)                        AS date,
+  DAY(timestamp)                                 AS day,
+  MONTH(timestamp)                               AS month,
+  YEAR(timestamp)                                AS year,
+
+---- Variables of Interest 
+  AVG(\"out.indoor_operative_temperature.conditioned_space..c\") AS mean_op_indoor_temp,
+  AVG(\"out.electricity.cooling.energy_consumption..kwh\") AS mean_cool_spend
+FROM read_parquet([
+    {query_sfa_path}
+], hive_partitioning = true)
+GROUP BY bldg_id, date, day, month, year
+ORDER BY bldg_id, date;"
+  )
+
+if (!c('phl_sfa_temps') %in% dbListTables(permanent_con)) {
+  dbExecute(permanent_con, sfa_temps_query)
+} else {
+  'Done, done, done'
+}
+
+## Did that work? 
+tbl(permanent_con, 'phl_sfa_temps') |> head() |> collect()
+```
+
+
+
+---
+
+## Adding outdoor weather
+
+Same principles here. This time, we'll just point to a different part of the file structure. Remember that the weather file is stored in csvs, where each file represents a county. 
+
+
+```{r}
+#| echo: true
+#| code-fold: true
+#| message: false
+#| collapse: true
+
+#' Get Counties to build new file paths 
+phl_counties <- map(
+  st_file_paths,
+  function(s3_path) {
+
+    cli::cli_alert('trying {s3_path}:')
+    dbGetQuery(
+      permanent_con,
+      str_glue(
+        "SELECT DISTINCT \"in.county\"
+         FROM read_parquet('{s3_path}')
+         WHERE \"in.geometry_building_type_acs\" = 'Single-Family Attached'
+         AND \"in.metropolitan_and_micropolitan_statistical_area\" = 'Philadelphia-Camden-Wilmington, PA-NJ-DE-MD MSA'"
+      )
+    )
+  }
+) |> 
+set_names(states)
+
+#' Get distinct counties to make things a little easier
+phl_co <- imap(phl_counties, ~mutate(.x, st_abb = .y)) |> list_rbind()
+
+
+#' build full file paths 
+phl_weath_path <- str_glue('{base_path}weather/state={phl_co$st_abb}/{phl_co$in.county}_2018.csv')
+phl_weath_path <- paste0("'", phl_weath_path, "'", collapse = ", ")
+
+#' Build Query 
+phl_weath_query <-
+
+ str_glue("
+CREATE TABLE phl_cbsa_co_weath AS
+SELECT
+  CAST(date_time AS DATE)                        AS date,
+  MONTH(CAST(date_time AS DATE))                 AS month,
+  YEAR(CAST(date_time AS DATE))                  AS year,
+  regexp_extract(filename, '(G[0-9]+)_', 1)      AS county_id,
+
+  -- drybulb
+  AVG(\"Dry Bulb Temperature [°C]\")             AS mean_daily_drybulb,
+  MIN(\"Dry Bulb Temperature [°C]\")             AS min_daily_drybulb,
+  MAX(\"Dry Bulb Temperature [°C]\")             AS max_daily_drybulb,
+  MAX(\"Dry Bulb Temperature [°C]\") - MIN(\"Dry Bulb Temperature [°C]\") AS range_daily_drybulb,
+
+  -- relative humidity
+  AVG(\"Relative Humidity [%]\")                 AS mean_daily_rh,
+  MIN(\"Relative Humidity [%]\")                 AS min_daily_rh,
+  MAX(\"Relative Humidity [%]\")                 AS max_daily_rh,
+  MAX(\"Relative Humidity [%]\") - MIN(\"Relative Humidity [%]\") AS range_daily_rh,
+
+  -- wind speed
+  AVG(\"Wind Speed [m/s]\")                      AS mean_daily_wind_speed,
+  MAX(\"Wind Speed [m/s]\")                      AS max_daily_wind_speed
+
+FROM read_csv([{phl_weath_path}], hive_partitioning = true, filename = true)
+GROUP BY date, month, year, county_id
+ORDER BY county_id, date
+")
+
+#' Execute query
+if (!c('phl_cbsa_co_weath') %in% dbListTables(permanent_con)){
+
+dbExecute(permanent_con, phl_weath_query)} else{
+
+  'Table Already made'
+}
+
+
+## Did that work? 
+tbl(permanent_con, 'phl_cbsa_co_weath') |> 
+head() |> 
+collect()
+```
+
+## Last Random things
+
+Just for fun, let's grab some additional housing characteristics so we can add a little more to our results.
+
+```{r}
+#| echo: true
+#| code-fold: true 
+#| collapse: true
+
+phl_attached_characs <- map(
+  st_file_paths,
+  function(s3_path) {
+
+    cli::cli_alert('trying {s3_path}:')
+    dbGetQuery(
+      permanent_con,
+      str_glue(
+        "SELECT  bldg_id, 
+                \"in.county\",
+                \"in.hvac_cooling_type\",
+                \"in.vintage_acs\"
+         FROM read_parquet('{s3_path}')
+         WHERE \"in.geometry_building_type_acs\" = 'Single-Family Attached'
+         AND \"in.metropolitan_and_micropolitan_statistical_area\" = 'Philadelphia-Camden-Wilmington, PA-NJ-DE-MD MSA'"
+      )
+    )
+  }
+) |> 
+set_names(states) |> 
+list_rbind()
+
+```
+
+---
+# Visualizing Indoor & Outdoor Temps 
+
+Let's calculate the **average indoor operative temperature** for our single family attached homes.
+
+```{r}
+#| echo: true
+#| code-fold: show
+#| warning: false
+#| message: false
+
+dbWriteTable(
+  permanent_con,
+  'phl_sfa_characs',
+  phl_attached_characs,
+  overwrite = TRUE,
+  memory = TRUE
+)
+
+#' Average indoor operative time across all attached buildings,
+#' By hvac & vintage
+indoor_temp_tbl <- 
+tbl(permanent_con, 'phl_sfa_temps') |>
+ left_join(tbl(permanent_con, 'phl_sfa_characs'), by = join_by(bldg_id)) |> 
+  summarise(
+    daily_mean_indoor_temp = mean(mean_op_indoor_temp),
+    .by = c('date', 'in.hvac_cooling_type', 'in.vintage_acs')
+  ) |> 
+  arrange(date) |> 
+  collect()
+
+#' Daily outdoor temp across all counties 
+outdoor_weath_tbl <-
+  tbl(permanent_con, 'phl_cbsa_co_weath') |> 
+  summarise(
+    mean_outdoor_temp = mean(mean_daily_drybulb),
+    .by = c('date')
+  ) |> 
+  collect()
+
+#' Join em up for the visual
+temps_tbl_fin <-
+  indoor_temp_tbl |> 
+  left_join(outdoor_weath_tbl) |> 
+  collect()
+```
+
+Anddd let's make a graph.
+
+```{r}
+#| fig-width: 8
+#| fig-height: 7
+#| echo: true
+#| code-fold: true
+#| outwidth: "100%"
 theme_resstock <- function(base_size = 12, base_family = "") {
   theme_minimal(base_size = base_size, base_family = base_family) %+replace%
     theme(
       # Background
-      plot.background  = element_rect(fill = "#FFFFFF", color = NA),
+      plot.background = element_rect(fill = "#FFFFFF", color = NA),
       panel.background = element_rect(fill = "#F9F7FF", color = NA),
 
       # Grid
@@ -197,83 +493,167 @@ theme_resstock <- function(base_size = 12, base_family = "") {
       panel.grid.minor = element_blank(),
 
       # Axes
-      axis.line  = element_line(color = "#5B21B6", linewidth = 0.45),
+      axis.line = element_line(color = "#5B21B6", linewidth = 0.45),
       axis.ticks = element_line(color = "#5B21B6", linewidth = 0.35),
-      axis.text  = element_text(color = "#3D2A6B", size = rel(0.88)),
-      axis.title = element_text(color = "#1E1B2E", size = rel(0.95), face = "bold",
-                                margin = margin(t = 6, r = 6)),
+      axis.text = element_text(color = "#3D2A6B", size = rel(0.88)),
+      axis.title = element_text(
+        color = "#1E1B2E",
+        size = rel(0.95),
+        face = "bold",
+        margin = margin(t = 6, r = 6)
+      ),
 
       # Title / subtitle / caption
-      plot.title    = element_text(color = "#1E1B2E", size = rel(1.25), face = "bold",
-                                   hjust = 0, margin = margin(b = 4)),
-      plot.subtitle = element_text(color = "#4A3F6B", size = rel(0.95),
-                                   hjust = 0, margin = margin(b = 12)),
-      plot.caption  = element_text(color = "#7C3AED", size = rel(0.78), hjust = 1,
-                                   margin = margin(t = 10)),
-      plot.margin   = margin(16, 20, 12, 16),
+      plot.title = element_text(
+        color = "#1E1B2E",
+        size = rel(1.25),
+        face = "bold",
+        hjust = 0,
+        margin = margin(b = 4)
+      ),
+      plot.subtitle = element_text(
+        color = "#4A3F6B",
+        size = rel(0.95),
+        hjust = 0,
+        margin = margin(b = 12)
+      ),
+      plot.caption = element_text(
+        color = "#7C3AED",
+        size = rel(0.78),
+        hjust = 1,
+        margin = margin(t = 10)
+      ),
+      plot.margin = margin(16, 20, 12, 16),
 
       # Legend
       legend.background = element_rect(fill = "#F9F7FF", color = NA),
-      legend.key        = element_rect(fill = "transparent", color = NA),
-      legend.title      = element_text(color = "#1E1B2E", face = "bold", size = rel(0.88)),
-      legend.text       = element_text(color = "#3D2A6B", size = rel(0.85)),
-      legend.position   = "bottom",
+      legend.key = element_rect(fill = "transparent", color = NA),
+      legend.title = element_text(
+        color = "#1E1B2E",
+        face = "bold",
+        size = rel(0.88)
+      ),
+      legend.text = element_text(color = "#3D2A6B", size = rel(0.85)),
+      legend.position = "bottom",
 
       # Facet strips
       strip.background = element_rect(fill = "#EDE9FE", color = NA),
-      strip.text       = element_text(color = "#5B21B6", face = "bold", size = rel(0.88))
+      strip.text = element_text(
+        color = "#5B21B6",
+        face = "bold",
+        size = rel(0.88)
+      )
     )
 }
 
-# ── Color scales ───────────────────────────────────────────────────────────────
-resstock_pal <- c(
-  "#7C3AED", "#A78BFA", "#5B21B6",
-  "#C4B5FD", "#4C1D95", "#DDD6FE"
-)
-
-scale_fill_resstock  <- function(...) scale_fill_manual(values  = resstock_pal, ...)
-scale_color_resstock <- function(...) scale_color_manual(values = resstock_pal, ...)
+temps_tbl_fin |>
+  filter(in.hvac_cooling_type != 'Non-Ducted Heat Pump') |>
+  mutate(
+    hvac_type = if_else(
+      in.hvac_cooling_type %in% c('Central AC', 'Ducted Heat Pump'),
+      'Ducted AC',
+      in.hvac_cooling_type
+    ),
+    hvac_type = fct_relevel(hvac_type, "None", after = 0L)
+  ) |>
+  ggplot(aes(
+    date,
+    daily_mean_indoor_temp * 9 / 5 + 32,
+    color = as.factor(in.vintage_acs)
+  )) +
+  geom_line() +
+  geom_line(
+    aes(date, mean_outdoor_temp * 9 / 5 + 32),
+    color = 'black',
+    alpha = .25,
+    linetype = 'dashed'
+  ) +
+  facet_wrap(~hvac_type, nrow = 3, scales = 'free') +
+  scale_color_viridis_d(option = "turbo", name = "Year-built") +
+  labs(
+    x = NULL,
+    y = "Daily mean temperature (°F)",
+    title = 'Indoor vs Outdoor Temperatures in Single Family Attached Homes',
+    subtitle = 'A comparison of indoor and outdoor temperatures in 2018 | Philadelphi CBSA',
+    caption = "Data from NREL ResStock's 2025 Output"
+  ) +
+  theme_resstock()
 ```
 
-### Demo — simulated annual electricity use by heating fuel & vintage
+
+# Energy Consumption On Cooling 
+
+
+```{r}
+#| fig-width: 8
+#| fig-height: 7
+#| echo: true
+#| code-fold: true
+#| outwidth: "100%"
+#| warning: false
+#| message: false
+
+indoor_spend_tbl <- 
+tbl(permanent_con, 'phl_sfa_temps') |>
+filter(month %in% c(6:9)) |> 
+ left_join(tbl(permanent_con, 'phl_sfa_characs'), by = join_by(bldg_id)) |> 
+  summarise(
+    daily_mean_cool_spend = mean(mean_cool_spend),
+    .by = c('date', 'in.hvac_cooling_type', 'in.vintage_acs')
+  ) |> 
+  arrange(date) |> 
+  collect()
+
+#' Daily outdoor temp across all co
+
+#' Join em up for the visual
+spend_tbl_fin <-
+  indoor_spend_tbl |> 
+  left_join(outdoor_weath_tbl) |> 
+  collect()
+
+
+spend_tbl_fin |>
+  filter(!in.hvac_cooling_type %in% c('Non-Ducted Heat Pump', 'None')) |>
+  mutate(
+    hvac_type = if_else(
+      in.hvac_cooling_type %in% c('Central AC', 'Ducted Heat Pump'),
+      'Ducted AC',
+      in.hvac_cooling_type
+    ),
+    hvac_type = fct_relevel(hvac_type, "None", after = 0L)
+  ) |>
+  ggplot(aes(
+    date,
+    daily_mean_cool_spend * 96,
+    color = as.factor(in.vintage_acs)
+  )) +
+  geom_line() +
+  # geom_line(
+  #   aes(date, mean_outdoor_temp * 9 / 5 + 32),
+  #   color = 'black',
+  #   alpha = .25,
+  #   linetype = 'dashed'
+  # ) +
+  facet_wrap(~hvac_type, nrow = 3, scales = 'free') +
+  scale_color_viridis_d(option = "mako", name = "Year-built") +
+  labs(
+    x = NULL,
+    y = "Daily total cooling energy (kWh)",
+    title = 'Average Cooling Energy Consumption in Single Family Attached Homes',
+    subtitle = 'A look at how much energy homes consume on cooling during the Summer | Philadelphia CBSA',
+    caption = "Data from NREL ResStock's 2025 Output"
+  ) +
+  theme_resstock()
+
+```
+
+
+
+
 
 ```{r}
 #| echo: true
-#| fig-width: 8
-#| fig-height: 5
-
-set.seed(42)
-
-df <- data.frame(
-  fuel = factor(
-    rep(c("Heat pump", "Natural gas", "Resistance\nelectric", "Propane", "Fuel oil"), each = 3),
-    levels = c("Heat pump", "Natural gas", "Propane", "Fuel oil", "Resistance\nelectric")
-  ),
-  vintage = factor(
-    rep(c("Pre-1980", "1980–2009", "2010 or later"), times = 5),
-    levels = c("Pre-1980", "1980–2009", "2010 or later")
-  ),
-  kwh = c(
-     9800,  8300,  7000,   # Heat pump
-     7100,  6000,  5300,   # Natural gas
-    13600, 11400,  9600,   # Resistance electric
-     8200,  7000,  6100,   # Propane
-     7700,  6600,  5900    # Fuel oil
-  ) + round(rnorm(15, 0, 150))
-)
-
-ggplot(df, aes(x = vintage, y = kwh / 1000, fill = vintage)) +
-  geom_col(width = 0.65, show.legend = FALSE) +
-  facet_wrap(~ fuel, nrow = 1) +
-  scale_fill_resstock() +
-  scale_y_continuous(expand = expansion(mult = c(0, 0.08))) +
-  labs(
-    title    = "Simulated annual electricity use by heating fuel and vintage",
-    subtitle = "Illustrative data — not from actual ResStock outputs",
-    x        = NULL,
-    y        = "Annual electricity (MWh)",
-    caption  = "theme_resstock()"
-  ) +
-  theme_resstock() +
-  theme(axis.text.x = element_text(angle = 35, hjust = 1, size = rel(0.78)))
+#| code-fold: true
+tbl(permanent_con, 'phl_sfa_characs') |> summarise(n = n(), .by = c('in.hvac_cooling_type'))
 ```
