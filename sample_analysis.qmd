@@ -3,18 +3,111 @@ title: "Querying ResStock with DuckDB"
 subtitle: "A walkthrough for accessing the ResStock S3 bucket"
 ---
 
+```{r}
+#| include: false
+
+theme_resstock <- function(base_size = 12, base_family = "") {
+  theme_minimal(base_size = base_size, base_family = base_family) %+replace%
+    theme(
+      # Background
+      plot.background = element_rect(fill = "#FFFFFF", color = NA),
+      panel.background = element_rect(fill = "#F9F7FF", color = NA),
+
+      # Grid
+      panel.grid.major = element_line(color = "#DDD6FE", linewidth = 0.4),
+      panel.grid.minor = element_blank(),
+
+      # Axes
+      axis.line = element_line(color = "#5B21B6", linewidth = 0.45),
+      axis.ticks = element_line(color = "#5B21B6", linewidth = 0.35),
+      axis.text = element_text(color = "#3D2A6B", size = rel(0.88)),
+      axis.title = element_text(
+        color = "#1E1B2E",
+        size = rel(0.95),
+        face = "bold",
+        margin = margin(t = 6, r = 6)
+      ),
+
+      # Title / subtitle / caption
+      plot.title = element_text(
+        color = "#1E1B2E",
+        size = rel(1.25),
+        face = "bold",
+        hjust = 0,
+        margin = margin(b = 4)
+      ),
+      plot.subtitle = element_text(
+        color = "#4A3F6B",
+        size = rel(0.95),
+        hjust = 0,
+        margin = margin(b = 12)
+      ),
+      plot.caption = element_text(
+        color = "#7C3AED",
+        size = rel(0.78),
+        hjust = 1,
+        margin = margin(t = 10)
+      ),
+      plot.margin = margin(16, 20, 12, 16),
+
+      # Legend
+      legend.background = element_rect(fill = "#F9F7FF", color = NA),
+      legend.key = element_rect(fill = "transparent", color = NA),
+      legend.title = element_text(
+        color = "#1E1B2E",
+        face = "bold",
+        size = rel(0.88)
+      ),
+      legend.text = element_text(color = "#3D2A6B", size = rel(0.85)),
+      legend.position = "bottom",
+
+      # Facet strips
+      strip.background = element_rect(fill = "#EDE9FE", color = NA),
+      strip.text = element_text(
+        color = "#5B21B6",
+        face = "bold",
+        size = rel(0.88)
+      )
+    )
+}
+
+
+```
+
 # What's going on in here? 
-This walkthrough covers how I would answer the following question:
+This walkthrough focuses on the following questions:
 
 > **1. How does indoor temperature relate to outdoor temperature in Philadelphia area single family attached homes?**
 
 > **2. How much do energy do people consume for cooling during the summer?**
 
-We'll use a tool called [`DuckDB`](https://duckdb.org/) to query both the [`annual_metadata`](https://data.openei.org/s3_viewer?bucket=oedi-data-lake&prefix=nrel-pds-building-stock%2Fend-use-load-profiles-for-us-building-stock%2F2025%2Fresstock_amy2018_release_1%2Fmetadata_and_annual_results%2F&limit=50) files and the individual building files from R. Ideally, this walkthrough will give you some tools that you can transfer to your question of interest. 
+We'll use a tool called [`DuckDB`](https://duckdb.org/) to query both the [`annual_metadata`](https://data.openei.org/s3_viewer?bucket=oedi-data-lake&prefix=nrel-pds-building-stock%2Fend-use-load-profiles-for-us-building-stock%2F2025%2Fresstock_amy2018_release_1%2Fmetadata_and_annual_results%2F&limit=50) files and the [individual building files](https://data.openei.org/s3_viewer?bucket=oedi-data-lake&prefix=nrel-pds-building-stock%2Fend-use-load-profiles-for-us-building-stock%2F2025%2Fresstock_amy2018_release_1%2Ftimeseries_individual_buildings%2F&limit=50) from R. Ideally, this will give you some tools to answer other questions of interest. 
 
 ::: {.callout-caution}
 This walkthrough assumes some knowledge of the [`{DBI}`](https://cran.r-project.org/web/packages/DBI/index.html) package and accessing databases in R. I'll touch on some of the concepts, but getting too in the weeds would make this post kind of long. For a more thorough introduction, see [Chapter 21 on databases from *R for Data Science 2e*](https://r4ds.hadley.nz/databases.html)
 
+:::
+
+## Whole Game 
+
+When querying against an S3 bucket, our workflow goes like this:
+
+```{mermaid}
+flowchart TD
+    A["**1. Define Your Question**<br/>Narrow your scope: geography,<br/>building type, EnergyPlus output"] --> B
+    B["**2. Locate the Data**<br/>Find the S3 file path and<br/>build a query-able reference"] --> C
+    C["**3. Write Your SQL Query**"]
+    C --> D["Save results to a local<br/>database file"]
+    C --> E["Pull results directly<br/>into R"]
+```
+
+As you work through my specific example, if you feel like I've lost you, refer back to this flow chart. That's all the preceding code is, even if its confusing or a little poorly thoughtout. 
+
+::: {.callout-tip}
+
+Working with big data like ResStock is a whole thing, but the **key rule of thumb** is to **target as few rows and files as possible with your queries.** The smaller the snatch of data that your query targets, the faster and less resource intesive it will be. 
+
+The big reason this gets a little confusing is because I spend a lot of time narrowing the query. 
 :::
 
 # Setup
@@ -33,7 +126,7 @@ pacman::p_load('duckdb', 'tidyverse')
 ```
 
 `{duckdb}` is a free, in-process database management system, which is a fancy way of storing and interacting with tabular data. It's smart, fast, and designed to work with hieararchical file systems like the ones 
-stored in ResStock' S3 bucket. 
+stored in ResStock's S3 bucket. 
 
 Using `{duckdb}` requires us write a little SQL, which is kind of an ugly, plain language way of interacting with data. But we'll get into that in a bit. 
 
@@ -54,7 +147,7 @@ temporary_con <- dbConnect(duckdb(), ":memory:") #' Temporary / default. Only la
 permanent_con <- dbConnect(duckdb(), 'data/db_storage.duckdb') #' A file path to store permanent results
 ```
 
-First we tell R our database driver (duckdb), then we tell it how we want to store data. **For ResStock analyses, I recommend storing query results permanently, either locally or on a Drexel server.** As researchers, we often wind up with 10 dozen auxiallary questions, and it seems better to me to start analyses from a permanent place then hitting ReStock's s3 bucket every time. In the long run, this will also save you lots of time. 
+First we tell R our database driver (duckdb), then we tell it how we want to store data. **For ResStock analyses, I recommend storing query results permanently, either locally or on a Drexel server.** As researchers, we often wind up with 10 dozen auxiallary questions, and it seems better to me to start analyses from a permanent place. In the long run, this will also save you lots of time. 
 
 
 ## Loading s3 connection extentions for our database connection
@@ -87,7 +180,7 @@ And now we're setup!
 Remember I said that working with these things is like working with a file system that lives on the cloud? It took some setup, but we're finally able to make that real.
 
 ## Build a file path
-Imagine that you were connecting to a file locally. You might do something like this:
+Imagine that you were connecting to a file locally. You might do start like this:
 
 ```{r}
 #| echo: true
@@ -105,7 +198,7 @@ You can think of that like your project root or working directory.
 
 Now, let's say that we want to start making some progress on our question. We know that we're interested in the Philadelphia CBSA, which comprises parts of Pennsylvania, Delaware and New Jersey. 
 
-We can keep our footprint small by focusing on those states sub-directories. We'll start by building out some filepaths for upgrade 0 parquets. 
+We can keep our footprint small by focusing on those states sub-directories.
 
 ```{r}
 #| echo: true
@@ -119,6 +212,7 @@ mtd_ann_results <- glue::glue(
   "metadata_and_annual_results/by_state/full/parquet/state={states}/{states}_upgrade0.parquet"
 )
 
+mtd_ann_results
 
 st_file_paths <-
   paste0(base_path, mtd_ann_results)
@@ -126,7 +220,7 @@ st_file_paths <-
 st_file_paths
 ```
 
-This gives us a 3 element character vector, where one vector element equals a state's file path. We can use these to (finally) connect to something. 
+This gives us a 3 element character vector, where one vector element equals a state's file path for building upgrade 0. We can use these to (finally) connect to something. 
 
 ## Get annual table schema
 
@@ -148,11 +242,15 @@ schema <- dbGetQuery(permanent_con, sprintf(
   st_file_paths[1]
 ))
 
-head(schema)
 
 ```
 
-Now, we have a list of column names, formats, and some empty metadata that you don't really need to worry about. We can use this schema to look through and figure out what variables that we need to start answering our question. 
+```{r}
+#| echo: true
+#| code-fold: show
+head(schema)
+```
+The `schema` obejcte gives us column names, formats, and some empty metadata that you don't really need to worry about. We can use this schema to look through and figure out what variables that we need to start answering our question. 
 
 
 A few column naming conventions to know:
@@ -162,7 +260,7 @@ A few column naming conventions to know:
 - `weight` — the statistical weight for each sample (how many real U.S. homes it represents)
 - `bldg_id` — unique building identifier, links to individual timeseries files
 
-Because, I've worked with this data a bit, I know that we can use these variables to identify which levels we'll need to filter for - both Philadelphia & single family attached. 
+Because, I've worked with this data a bit, I know which variables we need for our question. 
 
 ```{r}
 #| echo: true
@@ -170,7 +268,7 @@ Because, I've worked with this data a bit, I know that we can use these variable
 #| collapse: true 
 
 
-
+#' Get variable levels for building type & metro
 pa_house_cbsa_cats <-
 dbGetQuery(permanent_con, 
   str_glue(
@@ -182,7 +280,7 @@ dbGetQuery(permanent_con,
 ) 
 
 
-
+#' Narrow to Philly and attached homes 
 level_names <- 
 pa_house_cbsa_cats |> 
 filter(
@@ -190,6 +288,7 @@ filter(
   str_detect(in.metropolitan_and_micropolitan_statistical_area, 'Philadelphia')
 )
 
+#' The filters that we'll feed to our SQL query
 level_names
 
 
@@ -197,7 +296,7 @@ level_names
 
 ## Filter down to single family attached homes in Philly CBSA
 
-Now, we want to get the identifiers associated with single family attached homes in Philly. Now we'll use our other paths, and some r iteration to make that happen.
+Now, we want to know the `bldg_id` for each single family attached home in Philly. This will let us target specific parquet files within the [individual building files](https://data.openei.org/s3_viewer?bucket=oedi-data-lake&prefix=nrel-pds-building-stock%2Fend-use-load-profiles-for-us-building-stock%2F2025%2Fresstock_amy2018_release_1%2Ftimeseries_individual_buildings%2F&limit=50). 
 
 ```{r}
 #| echo: true
@@ -223,6 +322,10 @@ attached_ids <- map(
 ) |> 
 set_names(states)
 
+#' Building IDs
+head(attached_ids$PA)
+
+#' How many in each list element?
 map(attached_ids, nrow)
 ```
 
@@ -231,7 +334,7 @@ We have more ids then we know what to do with! (But more in PA, which makes sens
 
 # Individual Building Time Series
 
-With the pre-selected `bldg_id` values, we can move to querying the individual building time series and looking at our outcomes of interst. The process will be the same, (specify path --> write query ---> get result), but this time, we'll use `dbExecute()` and save results to a permanent table.
+With `bldg_id`, we can target each individual building at once for indoor temperature & cooling energy consumption.. The process will be the same, (specify path --> write query ---> get result), but this time, we'll use `dbExecute()` and save results to a permanent table.
 
 
 ## Specify Paths 
@@ -248,12 +351,17 @@ attached_ids_df <-
 imap(attached_ids, ~.x |> mutate(state = .y)) |> 
 list_rbind()
 
+#' Build a bundle of file paths, one for each row of 
+#' attached_ids_df
 indvid_build_path <- 
   str_glue(
   'timeseries_individual_buildings/by_state/upgrade=0/state={attached_ids_df$state}/{attached_ids_df$bldg_id}-0.parquet')
 
+#' Add them to base_path
 build_path_fin <-
   paste0(base_path, indvid_build_path)
+
+head(build_path_fin, 3)
 
 length(build_path_fin)
 
@@ -264,14 +372,16 @@ length(build_path_fin)
 
 Recall that building time series live in a slightly different place than the metadata that we just queried. These data are available in 15 increments for every building in the annual metadata for each day in 2018. This is a lot a lot of stuff, which is why we just spent time trying to focus our query. 
 
-For our purposes, we don't really care about that 15-minute increments. Rather we'll just focus on daily values for the moment. This means that we need to write some sql to aggregate from minutes to days. 
+For our purposes, we don't really care about that 15-minute increments. Rather we'll just focus on daily values for the moment. This means that we need to write some SQL to aggregate from minutes to days. 
 
 ```{r}
 #| echo: true
 #| code-fold: show
+
+#' Add outer quotes to a big old character vector of parquet file paths 
 query_sfa_path <- paste0("'", build_path_fin, "'", collapse = ", ")
 
-
+#' Build the SQL Query 
 sfa_temps_query <-
   str_glue(
     "CREATE TABLE phl_sfa_temps AS 
@@ -294,13 +404,15 @@ GROUP BY bldg_id, date, day, month, year
 ORDER BY bldg_id, date;"
   )
 
+#' {dbExecute} throws an error if you try to write a table that already 
+#' exists. This conditional deals with that.
 if (!c('phl_sfa_temps') %in% dbListTables(permanent_con)) {
   dbExecute(permanent_con, sfa_temps_query)
 } else {
   'Done, done, done'
 }
 
-## Did that work? 
+## Did that work? (Yes)
 tbl(permanent_con, 'phl_sfa_temps') |> head() |> collect()
 ```
 
@@ -310,7 +422,7 @@ tbl(permanent_con, 'phl_sfa_temps') |> head() |> collect()
 
 ## Adding outdoor weather
 
-Same principles here. This time, we'll just point to a different part of the file structure. Remember that the weather file is stored in csvs, where each file represents a county. 
+Same principles here. This time, we'll just point to a different part of the file structure. Remember that the weather file is stored in csvs, where each file represents a county.
 
 
 ```{r}
@@ -387,7 +499,7 @@ dbExecute(permanent_con, phl_weath_query)} else{
 }
 
 
-## Did that work? 
+## Did that work? (Yes)
 tbl(permanent_con, 'phl_cbsa_co_weath') |> 
 head() |> 
 collect()
@@ -437,6 +549,7 @@ Let's calculate the **average indoor operative temperature** for our single fami
 #| warning: false
 #| message: false
 
+#' Need temporary table in database to conduct joins out of memory
 dbWriteTable(
   permanent_con,
   'phl_sfa_characs',
@@ -481,70 +594,6 @@ Anddd let's make a graph.
 #| echo: true
 #| code-fold: true
 #| outwidth: "100%"
-theme_resstock <- function(base_size = 12, base_family = "") {
-  theme_minimal(base_size = base_size, base_family = base_family) %+replace%
-    theme(
-      # Background
-      plot.background = element_rect(fill = "#FFFFFF", color = NA),
-      panel.background = element_rect(fill = "#F9F7FF", color = NA),
-
-      # Grid
-      panel.grid.major = element_line(color = "#DDD6FE", linewidth = 0.4),
-      panel.grid.minor = element_blank(),
-
-      # Axes
-      axis.line = element_line(color = "#5B21B6", linewidth = 0.45),
-      axis.ticks = element_line(color = "#5B21B6", linewidth = 0.35),
-      axis.text = element_text(color = "#3D2A6B", size = rel(0.88)),
-      axis.title = element_text(
-        color = "#1E1B2E",
-        size = rel(0.95),
-        face = "bold",
-        margin = margin(t = 6, r = 6)
-      ),
-
-      # Title / subtitle / caption
-      plot.title = element_text(
-        color = "#1E1B2E",
-        size = rel(1.25),
-        face = "bold",
-        hjust = 0,
-        margin = margin(b = 4)
-      ),
-      plot.subtitle = element_text(
-        color = "#4A3F6B",
-        size = rel(0.95),
-        hjust = 0,
-        margin = margin(b = 12)
-      ),
-      plot.caption = element_text(
-        color = "#7C3AED",
-        size = rel(0.78),
-        hjust = 1,
-        margin = margin(t = 10)
-      ),
-      plot.margin = margin(16, 20, 12, 16),
-
-      # Legend
-      legend.background = element_rect(fill = "#F9F7FF", color = NA),
-      legend.key = element_rect(fill = "transparent", color = NA),
-      legend.title = element_text(
-        color = "#1E1B2E",
-        face = "bold",
-        size = rel(0.88)
-      ),
-      legend.text = element_text(color = "#3D2A6B", size = rel(0.85)),
-      legend.position = "bottom",
-
-      # Facet strips
-      strip.background = element_rect(fill = "#EDE9FE", color = NA),
-      strip.text = element_text(
-        color = "#5B21B6",
-        face = "bold",
-        size = rel(0.88)
-      )
-    )
-}
 
 temps_tbl_fin |>
   filter(in.hvac_cooling_type != 'Non-Ducted Heat Pump') |>
@@ -655,5 +704,7 @@ spend_tbl_fin |>
 ```{r}
 #| echo: true
 #| code-fold: true
-tbl(permanent_con, 'phl_sfa_characs') |> summarise(n = n(), .by = c('in.hvac_cooling_type'))
+tbl(permanent_con, 'phl_sfa_characs') |>
+  summarise(n = n(), .by = c('in.hvac_cooling_type')) |>
+  collect()
 ```

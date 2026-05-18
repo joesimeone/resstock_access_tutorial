@@ -13,19 +13,19 @@ library(htmltools)
 
 ## What is this dataset?
 
-[ResStock](https://resstock.nlr.gov/datasets) is NREL's large-scale simulation model of 2019 U.S. residential building stock. The **2025 release** (`resstock_amy2018_release_1`) simulated roughly 550,000 representative homes using EnergyPlus with **2018 actual meteorological year (AMY)** weather. Each home was simulated under a **baseline (as-is)** condition and **32 upgrade scenarios** covering equipment replacements, envelope improvements, electric vehicles, and demand flexibility strategies. Results are available in **15-minute** increments for the full year, covering subjects such as **energy consumption**, **emissions**, and the **indoor environment**. 
+[ResStock](https://resstock.nlr.gov/datasets) is NREL's large-scale simulation model of 2019 U.S. residential building stock. The **2025 release** (`resstock_amy2018_release_1`) simulated roughly 550,000 representative homes using EnergyPlus with **2018 actual meteorological year (AMY)** weather. Each home was simulated under a **baseline (as-is)** condition and **32 upgrade scenarios**, testing scenarios such as equipment replacements, envelope improvements, electric vehicles, and demand flexibility strategies. Results are available in **15-minute** increments for the full year, simulating **energy consumption**, **emissions**, **indoor environment**, and more. 
 
 While ResStock is an incredibly rich source of information, orienting oneself to its contents can be... overwhelming. I'm writing this guide mostly to share some things that I've learned. 
 
 ## Who is this guide for? 
 
-Anyone who feels like they needs some help accessing ResStocks daily estimates or orienting themselves to the many resources NREL provides. I'm writing this primarily for members of Drexel's **R01 Heat Study Team**, who are health researchers interested in the effects indoor temperature. Our use case is a little non-traditional for ePlus simulations, but anyone encountering stuff like [s3 buckets](https://aws.amazon.com/s3/?trk=50b671a1-06f5-4224-9505-fa45ee881c08&sc_channel=ps&trk=319436d7-2418-4600-ad06-bad3656784a3&sc_channel=ps&ef_id=Cj0KCQjwiJvQBhCYARIsAMjts3Jv8zopax1uNKTcIR-UN6GiLZKWQzZHna_m-In8mWYwKa3TE-QglwYaAq-EEALw_wcB:G:s&s_kwcid=AL!4422!3!808868439763!e!!g!!amazonaws%20s3!23522747487!196433733807&gad_campaignid=23522747487&gbraid=0AAAAADjHtp-hSB5jcKGNMoF5yFF9jvvBZ&gclid=Cj0KCQjwiJvQBhCYARIsAMjts3Jv8zopax1uNKTcIR-UN6GiLZKWQzZHna_m-In8mWYwKa3TE-QglwYaAq-EEALw_wcB) or [hive partitions](https://delta.io/blog/pros-cons-hive-style-partionining/) for the first time might find this useful.
+Anyone who feels like they needs some help navigating ResStock resources or accessing ResStocks daily estimates. I'm writing this primarily for members of Drexel's **R01 Heat Study Team**. We are health researchers interested in the effects indoor temperature. Our use case is a little non-traditional for ePlus simulations, but anyone encountering stuff like [s3 buckets](https://aws.amazon.com/s3/?trk=50b671a1-06f5-4224-9505-fa45ee881c08&sc_channel=ps&trk=319436d7-2418-4600-ad06-bad3656784a3&sc_channel=ps&ef_id=Cj0KCQjwiJvQBhCYARIsAMjts3Jv8zopax1uNKTcIR-UN6GiLZKWQzZHna_m-In8mWYwKa3TE-QglwYaAq-EEALw_wcB:G:s&s_kwcid=AL!4422!3!808868439763!e!!g!!amazonaws%20s3!23522747487!196433733807&gad_campaignid=23522747487&gbraid=0AAAAADjHtp-hSB5jcKGNMoF5yFF9jvvBZ&gclid=Cj0KCQjwiJvQBhCYARIsAMjts3Jv8zopax1uNKTcIR-UN6GiLZKWQzZHna_m-In8mWYwKa3TE-QglwYaAq-EEALw_wcB) or [hive partitions](https://delta.io/blog/pros-cons-hive-style-partionining/) for the first time might find this useful.
 
 ## What's here?
 
-On overview page, users will find an overview of what's available in the **ResStock 2025** release, including some information on the metadata and annual results, individual building time series, and amy 2018 weather data. 
+On this page, users will find an overview of what's available in the **ResStock 2025** release, including some information on the metadata and annual results, individual building time series, and amy 2018 weather data. 
 
-On the sample analysis page, users can follow along as I work try to answer the following question -- **how does indoor temperature in Philadelphia area single attached homes vary across the year, and how much energy do people spend keeping these homes comfortable?**
+On the sample analysis page, users can follow along as I work try to answer the following question -- **how does indoor temperature compare to outdoor temperature in Philadelphia area single family attached homes, and how much energy do people consume keeping these homes comfortable?**
 
 ## Where does ResStock data live? 
 
@@ -49,7 +49,7 @@ In essence, an s3 bucket is jargon for *a file storage system that lives online*
 ::: {.callout-note}
  I've started us a little deeper in the file system than it's start. The full path to 2025 (and other releases) is: `oedi-data-lake/nrel-pds-building-stock/end-use-for-us-building-stock/*`
 
-But the substance of ResStock doesn't real start until you hit the year paths, so I'm starting there. 
+But the substance of ResStock doesn't real start until you hit the year folders, so I'm starting there. 
 :::
 
 ## Folder Map
@@ -121,6 +121,8 @@ resstock_amy2018_release_1/
 
 ## Folder Descriptions
 
+I'll focus on the 3 folders and files that are most important to indoor temperature specific analyses -- **metadata and annual results**, **individual building time series**, and **actual weather files**. 
+
 ### `metadata_and_annual_results/`
 
 This is the most common starting point for analysis. It contains a **wide, flat table** where each row is one simulated building and columns cover two things: (1) the building's characteristics, denoted by `in.{variable_name}`, and (2) its annual energy consumption (outputs from ePlus), denoted by `out.{variable_name}.` 
@@ -154,7 +156,7 @@ The `national/` files contain all ~550,000 buildings in a single file per upgrad
 
 Files are named `upgrade0.parquet`, `upgrade1.parquet`, ..., `upgrade32.parquet`. Upgrade 0 is the **baseline** (buildings as they currently exist); upgrades 1–32 represent hypothetical retrofits applied to the same set of buildings (see [Building Upgrades] below).
 
-Both `csv/` and `parquet/` subdirectories are provided. I really, really reccommend that use [parquet files](https://parquet.apache.org/) for anything ResStock related. Both the storage and performance make the tradeoff in less familiar file format worthwhile. 
+Both `csv/` and `parquet/` subdirectories are provided. I really, really reccommend that you use [parquet files](https://parquet.apache.org/) for anything ResStock related. Both the storage and performance gains make working with a less familiar file format worth it. 
 
 If you're not familiar with parquet, don't sweat it! It's another way of storing tabular data meant to be accessed with software. In the analysis section, I'll show you how you can use `{duckdb}`(https://duckdb.org/docs/current/clients/r) to access them. 
 
@@ -163,7 +165,7 @@ If you're not familiar with parquet, don't sweat it! It's another way of storing
 
 ### `timeseries_individual_buildings/`
 
-This folder contains the full sub-hourly timeseries for every simulated building — the most granular data in the dataset. Each Parquet file holds **one building's entire year of simulation output** at 15-minute intervals (~35,040 rows). These files are far richer than just energy consumption. they include indoor environmental conditions, emissions, airflow, occupant schedules, and weather.
+This folder contains the full sub-hourly timeseries for every simulated building — the most granular data in the dataset. Each Parquet file holds **one building's entire year of simulation output** at 15-minute intervals (~35,040 rows). These files are far richer than just energy consumption. They include indoor environmental conditions, emissions, airflow, occupant schedules, and weather.
 
 
 **Structure:**
@@ -176,7 +178,7 @@ timeseries_individual_buildings/
             └── {building_id}-{upgrade}.parquet
 ```
 
-Files are named like `100102-0.parquet` — the number before the dash is the building's unique ID, the number after is the upgrade scenario. Individual files are small (~2–3 MB each), but the full dataset across all states and upgrades is enormous (roughly `r formatC(550000 * 35040, big.mark = ',')`). Working with them requires big data tools and a little finesse. **Always filter by state and upgrade** before downloading at scale.
+Files are named like `100102-0.parquet`. The number before the dash is the building's unique ID, the number after is the upgrade scenario. Individual files are small (~2–3 MB each), but the full dataset across all states and upgrades is enormous (roughly `r formatC(550000 * 35040, big.mark = ',')`). Working with them requires big data tools and a little finesse. At a minimum, you should **always filter by state and upgrade** before downloading at scale.
 
 **Column naming convention**
 
@@ -195,8 +197,7 @@ The leading `out.` marks simulation outputs. `in.sqft` (floor area) is the one i
 ```{r}
 #| echo: false
 #| message: false
-library(reactable)
-library(htmltools)
+
 
 d <- data.frame(
   Category = c(
@@ -278,7 +279,7 @@ This folder is the right place to go for **load shape analysis** — peak demand
 
 ### `weather/`
 
-This folder contains the **actual meteorological year (AMY) 2018 weather data** used as inputs to the EnergyPlus simulations. AMY data reflects what actually happened in 2018 rather than a statistically "typical" year — meaning it captures the real heat waves, cold snaps, and cloud cover from that year.
+This folder contains the **actual meteorological year (AMY) 2018 weather data** used as inputs to the EnergyPlus simulations. AMY data reflects what actually happened in 2018 rather than a statistically "typical" year, meaning it captures the real heat waves, cold snaps, and cloud cover from that year.
 
 **Structure:**
 
